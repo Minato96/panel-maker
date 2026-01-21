@@ -2,7 +2,7 @@ import csv
 from urllib.parse import urlparse
 
 INPUT_CSV = "final_panel_data_final_4.csv"
-OUTPUT_CSV = "clean_urls_2.csv"
+OUTPUT_CSV = "clean_urls_3.csv"
 COLUMN_NAME = "internal_link"
 
 seen = set()
@@ -31,7 +31,16 @@ def extract_original_url(url):
 
 def is_valid_theresanaiforthat_url(url):
     parsed = urlparse(url)
-    return parsed.netloc == "theresanaiforthat.com"
+
+    # Must be the correct domain
+    if parsed.netloc != "theresanaiforthat.com":
+        return False
+
+    # Must start with /ai/
+    if not parsed.path.startswith("/ai/"):
+        return False
+
+    return True
 
 
 with open(INPUT_CSV, newline="", encoding="utf-8") as infile, \
