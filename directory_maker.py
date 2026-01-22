@@ -161,7 +161,7 @@ for url in tqdm(urls_df["url"], desc="Processing tools"):
         "description": description,
         "description_length": len(description) if isinstance(description, str) else None,
         "saves": row.get("saves"),
-        "comments": row.get("comments"),
+        "comments": row.get("comments_json"),
         "comments_count": row.get("comments_count"),
         "views": row.get("views"),
         "rating": row.get("rating"),
