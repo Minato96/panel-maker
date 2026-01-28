@@ -9,16 +9,14 @@ from tqdm import tqdm
 # ================= CONFIG =================
 
 DIRECTORY_CSV = "new_directory.csv"
-LIVE_CSV = "ai_tools_missed.csv"
+WAYBACK_CSV = "still_missing_unified.csv"
 
-PRIMARY_CSV = "ai_tools_missed.csv"
-SECONDARY_CSV = "ai_tools_missed.csv"
-
-CURRENT_DATA_DATE = "2026-01-26"
-
-# ================= HELPERS =================
+OUTPUT_DIRECTORY = "new_directory.csv"
+STILL_MISSING = "still_missing_2.csv"
 
 WAYBACK_RE = re.compile(r"https://web\.archive\.org/web/(\d{14})/(https://.+)")
+
+# ================= HELPERS =================
 
 def norm(u):
     if not isinstance(u, str):
@@ -28,17 +26,15 @@ def norm(u):
 def extract_wayback_info(url):
     if not isinstance(url, str):
         return None, None
-
     m = WAYBACK_RE.match(url)
     if not m:
         return None, None
-
     ts = m.group(1)
-    original = m.group(2).rstrip("/")
+    original = norm(m.group(2))
     date = datetime.strptime(ts[:8], "%Y%m%d").date()
     return original, date
 
-def safe_json_load(x):
+def safe_json(x):
     if pd.isna(x):
         return []
     try:
@@ -46,106 +42,86 @@ def safe_json_load(x):
     except Exception:
         return []
 
-def get_release_date(versions_json):
-    dates = []
-    for v in safe_json_load(versions_json):
-        if "date" in v:
-            try:
-                dates.append(datetime.strptime(v["date"], "%Y-%m-%d").date())
-            except Exception:
-                pass
-    return min(dates) if dates else None
-
-def build_pricing_text(row):
+def merge_pricing(row):
     parts = []
-    for col in ["pricing_model", "paid_options_from", "billing_frequency"]:
+    for col in [
+        "pricing_model",
+        "paid_options_from",
+        "billing_frequency",
+        "tag_price"
+    ]:
         val = row.get(col)
-        if pd.notna(val) and str(val).strip():
-            parts.append(str(val).strip())
-    return " | ".join(parts) if parts else None
+        if isinstance(val, str) and val.strip():
+            parts.append(val.strip())
+    return " | ".join(dict.fromkeys(parts)) if parts else None
 
 # ================= LOAD =================
 
 dir_df = pd.read_csv(DIRECTORY_CSV)
-live_df = pd.read_csv(LIVE_CSV)
+way_df = pd.read_csv(WAYBACK_CSV, low_memory=False)
 
-primary_df = pd.read_csv(PRIMARY_CSV)
-secondary_df = pd.read_csv(SECONDARY_CSV)
-
-# normalize
 dir_df["tool_id"] = dir_df["tool_id"].apply(norm)
-live_df["link"] = live_df["link"].apply(norm)
-primary_df["link"] = primary_df["link"].apply(norm)
+dir_df["name"] = dir_df["name"].replace("", pd.NA)
 
 dir_df.set_index("tool_id", inplace=True)
-primary_map = primary_df.set_index("link")
 
-# ================= PREP SECONDARY =================
+# ================= INDEX WAYBACK (LATEST SNAPSHOT ONLY) =================
 
-records = {}
+latest = {}
 
-for _, row in secondary_df.iterrows():
+for _, row in tqdm(way_df.iterrows(), total=len(way_df), desc="Indexing wayback"):
     original, snap_date = extract_wayback_info(row.get("link"))
     if not original:
         continue
 
-    if original not in records or records[original]["snapshot_date"] < snap_date:
-        records[original] = {
+    if (
+        original not in latest
+        or latest[original]["snapshot_date"] < snap_date
+    ):
+        latest[original] = {
             "row": row,
             "snapshot_date": snap_date
         }
 
-# ================= PROCESS LIVE CSV =================
+# ================= FILL EXITED TOOLS =================
 
-for _, row in tqdm(live_df.iterrows(), total=len(live_df), desc="Updating directory"):
-    url = row.get("link")
-    name = row.get("name")
-
-    if url not in dir_df.index:
+for tool_id, drow in tqdm(
+    dir_df[
+        (dir_df["exited"] == 1) &
+        (dir_df["name"].isna())
+    ].iterrows(),
+    desc="Filling exited tools"
+):
+    if tool_id not in latest:
         continue
 
-    # ---- CASE 1: DEAD ----
-    if not isinstance(name, str) or not name.strip():
-        dir_df.loc[url, "exited"] = 1
-        continue
+    w = latest[tool_id]["row"]
 
-    # ---- CASE 2: LIVE → UPDATE DATA ----
-    data_row = None
-    last_date = None
-
-    if url in primary_map.index:
-        data_row = primary_map.loc[url]
-        last_date = CURRENT_DATA_DATE
-    elif url in records:
-        data_row = records[url]["row"]
-        last_date = records[url]["snapshot_date"].isoformat()
-
-    if data_row is None:
-        continue
-
-    # update fields in-place
-    dir_df.loc[url, "name"] = data_row.get("name")
-    dir_df.loc[url, "release_date"] = get_release_date(data_row.get("versions"))
-    dir_df.loc[url, "pricing_text"] = build_pricing_text(data_row)
-    dir_df.loc[url, "description"] = data_row.get("description")
-    dir_df.loc[url, "description_length"] = (
-        len(data_row.get("description"))
-        if isinstance(data_row.get("description"), str)
+    dir_df.loc[tool_id, "name"] = w.get("name")
+    dir_df.loc[tool_id, "description"] = w.get("description")
+    dir_df.loc[tool_id, "description_length"] = (
+        len(w.get("description"))
+        if isinstance(w.get("description"), str)
         else None
     )
-    dir_df.loc[url, "saves"] = data_row.get("saves")
-    dir_df.loc[url, "comments"] = data_row.get("comments_json")
-    dir_df.loc[url, "comments_count"] = data_row.get("comments_count")
-    dir_df.loc[url, "views"] = data_row.get("views")
-    dir_df.loc[url, "rating"] = data_row.get("rating")
-    dir_df.loc[url, "ratings_count"] = data_row.get("number_of_ratings")
-    dir_df.loc[url, "input_modalities"] = data_row.get("modalities_inputs")
-    dir_df.loc[url, "output_modalities"] = data_row.get("modalities_outputs")
-    dir_df.loc[url, "tasks"] = data_row.get("task_label_name")
-    dir_df.loc[url, "last_date"] = last_date
+    dir_df.loc[tool_id, "pricing_text"] = merge_pricing(w)
+    dir_df.loc[tool_id, "saves"] = w.get("saves")
+    dir_df.loc[tool_id, "rating"] = w.get("rating")
+    dir_df.loc[tool_id, "ratings_count"] = w.get("number_of_ratings")
+    dir_df.loc[tool_id, "input_modalities"] = w.get("modalities_inputs")
+    dir_df.loc[tool_id, "output_modalities"] = w.get("modalities_outputs")
+    dir_df.loc[tool_id, "tasks"] = w.get("task_label_name")
+    dir_df.loc[tool_id, "last_date"] = latest[tool_id]["snapshot_date"].isoformat()
 
-# ================= WRITE =================
+# ================= WRITE DIRECTORY =================
 
-dir_df.reset_index().to_csv(DIRECTORY_CSV, index=False)
+dir_df.reset_index().to_csv(OUTPUT_DIRECTORY, index=False)
 
-print("✅ Directory updated in-place from live CSV")
+# ================= STILL MISSING =================
+
+still_missing = dir_df[dir_df["name"].isna()].reset_index()
+
+still_missing[["tool_id"]].to_csv(STILL_MISSING, index=False)
+
+print("✅ Exited tools enriched")
+print(f"Still missing: {len(still_missing)}")
